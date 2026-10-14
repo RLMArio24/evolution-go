@@ -1,0 +1,52 @@
+name: Auth pool validation
+
+on:
+  pull_request:
+    branches: [review/base-v0.7.2-auth-pool]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auth-pool-validation-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  auth-pool:
+    if: github.event.pull_request.number == 1 && github.event.pull_request.head.ref == 'fix/auth-pool-lifecycle-20261014'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '1'
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_DB: evogo_auth_pool_test
+          POSTGRES_USER: evogo_auth_pool_test
+          POSTGRES_PASSWORD: ephemeral-auth-pool-test
+        ports:
+          - 127.0.0.1:65432:5432
+        options: >-
+          --health-cmd "pg_isready -U evogo_auth_pool_test -d evogo_auth_pool_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.6'
+          cache: false
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential libjpeg-dev libwebp-dev
+      - name: Build application
+        run: go build -mod=readonly -o "$RUNNER_TEMP/evolution-go-validation" ./cmd/evolution-go
+      - name: Test affected lifecycle with race detector
+        run: go test -mod=readonly -race -count=1 -timeout=3m -v ./pkg/whatsmeow/service -run '^TestAuthContainer(ReconnectReuse|ConcurrentInitialization|FailureInitializationRetry)$'
+      - name: Test isolated PostgreSQL lifecycle with race detector
+        env:
+          EVOGO_AUTH_POOL_INTEGRATION: isolated-postgres
+        run: go test -mod=readonly -tags=integration -race -count=1 -timeout=3m -v ./pkg/whatsmeow/service -run '^TestAuthContainerPostgresIntegration$'
